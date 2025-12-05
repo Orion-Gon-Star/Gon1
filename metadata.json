@@ -1,0 +1,7 @@
+{
+  "name": "AR Galaxy Gallery",
+  "description": "A futuristic AR photo gallery controlled by hand gestures. Toggle between a Star Sphere and a Photo Galaxy.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
