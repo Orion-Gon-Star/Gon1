@@ -1,14 +1,15 @@
+
 export const CONFIG = {
-  PARTICLE_COUNT: 400,
+  PARTICLE_COUNT: 600, // Increased for denser cube/starfield
   CAMERA_WIDTH: 1280,
   CAMERA_HEIGHT: 720,
-  SMOOTHING_FACTOR: 0.25, // Lower = smoother but more delay. 0.25 is a good balance.
-  DWELL_TIME: 500, // ms to hover before opening
-  WAKE_THRESHOLD: 50, // Amount of motion energy needed to wake
-  WAKE_DECAY: 2, // How fast wake energy dissipates
-  SPHERE_RADIUS: 250,
-  GALAXY_SPIRAL_TIGHTNESS: 0.2,
-  SNAP_DISTANCE: 60, // Pixel distance to snap to a photo
+  SMOOTHING_FACTOR: 0.15, // Smoother hand tracking
+  DWELL_TIME: 500, 
+  WAKE_THRESHOLD: 40, 
+  WAKE_DECAY: 1.5,
+  CUBE_SIZE: 180, // Size of the cube (half-width)
+  SNAP_DISTANCE: 70, 
+  GLOW_INTENSITY: 20,
 };
 
 export const COLORS = {
@@ -16,4 +17,5 @@ export const COLORS = {
   SECONDARY: '#ff00ff', // Magenta
   TEXT: '#ffffff',
   PARTICLE_BASE: 'rgba(200, 230, 255, 0.8)',
+  CUBE_EDGE: 'rgba(0, 255, 255, 0.3)',
 };

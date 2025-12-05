@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { AppMode, PhotoData } from '../types';
 
@@ -27,7 +28,7 @@ const UIOverlay: React.FC<UIOverlayProps> = ({ mode, hoverProgress, activePhoto,
       {mode === AppMode.SLEEP && (
         <div className="absolute inset-0 flex flex-col items-center justify-center">
             <h1 className="text-4xl md:text-6xl font-bold text-white tracking-[0.2em] animate-pulse drop-shadow-[0_0_10px_rgba(0,255,255,0.8)]">
-                WAKE UP
+                AWAKEN
             </h1>
             <p className="text-cyan-300 mt-4 text-sm tracking-widest uppercase opacity-80">
                 Wave right hand to activate
@@ -48,10 +49,10 @@ const UIOverlay: React.FC<UIOverlayProps> = ({ mode, hoverProgress, activePhoto,
             {/* TOP LEFT STATUS */}
             <div className={`absolute top-6 left-6 transition-opacity duration-500 ${mode === AppMode.GALAXY ? 'opacity-0' : 'opacity-100'}`}>
                 <div className="bg-black/40 backdrop-blur-md border border-white/10 p-4 rounded-xl text-white shadow-lg max-w-xs pointer-events-auto">
-                    <h2 className="text-cyan-400 font-bold text-lg mb-1 drop-shadow-md">AR GALAXY</h2>
+                    <h2 className="text-cyan-400 font-bold text-lg mb-1 drop-shadow-md">AR CUBE</h2>
                     <div className="text-xs text-gray-300 space-y-1">
-                        <p><span className="text-magenta-500 font-bold">Left Open:</span> Expand Galaxy</p>
-                        <p><span className="text-cyan-500 font-bold">Left Fist:</span> Star Sphere</p>
+                        <p><span className="text-magenta-500 font-bold">Left Open:</span> Expand Universe</p>
+                        <p><span className="text-cyan-500 font-bold">Left Fist:</span> Reset to Cube</p>
                         <p><span className="text-white font-bold">Right Point:</span> Cursor</p>
                     </div>
                 </div>
@@ -68,9 +69,6 @@ const UIOverlay: React.FC<UIOverlayProps> = ({ mode, hoverProgress, activePhoto,
                     <input type="file" multiple accept="image/*" className="hidden" onChange={handleFileChange} />
                 </label>
             </div>
-
-            {/* HOVER PROGRESS CURSOR RING (CENTERED ON CURSOR, BUT UI IS STATIC, SO WE USE FIXED POSITION OR CANVAS) */}
-            {/* Note: The logical cursor ring is drawn in ARView canvas for sync. This is mostly text/panels. */}
         </>
       )}
 

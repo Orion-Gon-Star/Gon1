@@ -1,12 +1,12 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+
+import React, { useEffect, useRef } from 'react';
 import { Particle, AppMode, HandGesture, PhotoData, Point } from '../types';
 import { CONFIG, COLORS } from '../constants';
-import { lerp, getDistance, toScreen, detectLeftHandGesture } from '../utils/math';
+import { lerp, getDistance, toScreen, detectLeftHandGesture, rotate3D } from '../utils/math';
 
 declare global {
   interface Window {
     Hands: any;
-    Camera: any;
   }
 }
 
@@ -21,26 +21,28 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
-  // Mutable State (Refs for performance)
   const particles = useRef<Particle[]>([]);
   const state = useRef({
     mode: AppMode.SLEEP,
     leftGesture: HandGesture.NONE,
     cursor: { x: -100, y: -100, active: false } as Point & { active: boolean },
     rawCursor: { x: -100, y: -100 } as Point,
+    // Rotation state (Auto)
+    rot: { pitch: 0, yaw: 0, roll: 0 },
+    rotSpeeds: { pitch: 0.005, yaw: 0.008, roll: 0.003 }, // Constant rotation speeds
     hoveredParticleId: -1,
     hoverStartTime: 0,
     wakeEnergy: 0,
     lastHandPos: { x: 0, y: 0 },
-    rotation: 0, // Global rotation for sphere
     activePhotoId: null as string | null,
+    // Store normalized random targets (0.0 to 1.0) for Galaxy mode
+    galaxyTargets: [] as {nx: number, ny: number}[],
   });
 
-  // Initialization
   useEffect(() => {
     initParticles();
     
-    // MediaPipe Setup
+    // Initialize Hands
     const hands = new window.Hands({
       locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
     });
@@ -54,68 +56,150 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
 
     hands.onResults(onResults);
 
-    if (videoRef.current) {
-      const camera = new window.Camera(videoRef.current, {
-        onFrame: async () => {
-          if (videoRef.current) await hands.send({ image: videoRef.current });
-        },
-        width: CONFIG.CAMERA_WIDTH,
-        height: CONFIG.CAMERA_HEIGHT,
-      });
-      camera.start();
-    }
+    // Manual Camera Setup
+    let active = true;
+    let stream: MediaStream | null = null;
+    let animId: number;
 
-    // Start Render Loop
-    const animId = requestAnimationFrame(renderLoop);
-    return () => cancelAnimationFrame(animId);
+    const startCamera = async () => {
+      try {
+        try {
+            // Attempt 1: Preferred settings (User facing, HD)
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    width: { ideal: CONFIG.CAMERA_WIDTH },
+                    height: { ideal: CONFIG.CAMERA_HEIGHT },
+                    facingMode: 'user'
+                }
+            });
+        } catch (e) {
+            console.warn("Preferred camera config failed, trying fallback...", e);
+            // Attempt 2: Fallback to any available video source
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: true
+            });
+        }
+
+        if (videoRef.current && active && stream) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.onloadedmetadata = () => {
+            if (active && videoRef.current) {
+                videoRef.current.play().catch(e => console.error("Play error:", e));
+                requestAnimationFrame(predictLoop);
+            }
+          };
+        }
+      } catch (err) {
+        console.error("Error accessing camera:", err);
+      }
+    };
+
+    const predictLoop = async () => {
+      if (!active) return;
+      if (videoRef.current && videoRef.current.readyState >= 2) {
+        await hands.send({ image: videoRef.current });
+      }
+      if (active) requestAnimationFrame(predictLoop);
+    };
+
+    startCamera();
+
+    // Rendering Loop (Physics + Draw)
+    const renderTick = () => {
+        if (!active) return;
+        
+        // Handle canvas resize if needed
+        if (canvasRef.current && window.innerWidth !== canvasRef.current.width) {
+            canvasRef.current.width = window.innerWidth;
+            canvasRef.current.height = window.innerHeight;
+        }
+
+        updatePhysics();
+        draw();
+        animId = requestAnimationFrame(renderTick);
+    };
+    animId = requestAnimationFrame(renderTick);
+
+    // Cleanup
+    return () => {
+      active = false;
+      cancelAnimationFrame(animId);
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+      hands.close();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Sync photos when they change
   useEffect(() => {
     updateParticlesWithPhotos();
+    generateGalaxyTargets();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [photos]);
 
   const initParticles = () => {
     const tempParticles: Particle[] = [];
+    const size = CONFIG.CUBE_SIZE;
+    
     for (let i = 0; i < CONFIG.PARTICLE_COUNT; i++) {
-      const isPhoto = false; 
+      // Random position inside the Cube volume
+      const px = (Math.random() - 0.5) * 2 * size;
+      const py = (Math.random() - 0.5) * 2 * size;
+      const pz = (Math.random() - 0.5) * 2 * size;
+
       tempParticles.push({
         id: i,
-        x: Math.random() * window.innerWidth,
-        y: Math.random() * window.innerHeight,
-        z: 0,
-        tx: 0, ty: 0, vx: 0, vy: 0,
+        x: window.innerWidth / 2, // Start center
+        y: window.innerHeight / 2,
+        z: pz,
+        // Store cubic local coordinates in vx/vy and we will manage Z via ID or calc
+        vx: px, vy: py,  
+        tx: 0, ty: 0,    
         baseSize: Math.random() * 2 + 1,
-        color: i % 2 === 0 ? COLORS.PRIMARY : COLORS.SECONDARY,
-        isPhoto,
+        color: i % 3 === 0 ? COLORS.PRIMARY : (i % 3 === 1 ? COLORS.SECONDARY : '#ffffff'),
+        isPhoto: false,
         photoData: null,
-        angle: Math.random() * Math.PI * 2,
-        radius: Math.random() * CONFIG.SPHERE_RADIUS,
-        speed: 0.005 + Math.random() * 0.01,
+        angle: Math.random() * Math.PI * 2, // Used for blinking offset
+        radius: 0,
+        speed: 0.005 + Math.random() * 0.02,
       });
     }
     particles.current = tempParticles;
+    generateGalaxyTargets();
+  };
+
+  const generateGalaxyTargets = () => {
+    const targets: {nx: number, ny: number}[] = [];
+    // Generate random NORMALIZED positions (0.0 to 1.0)
+    for (let i = 0; i < CONFIG.PARTICLE_COUNT; i++) {
+        targets.push({
+            nx: Math.random(), 
+            ny: Math.random() 
+        });
+    }
+    state.current.galaxyTargets = targets;
   };
 
   const updateParticlesWithPhotos = () => {
-    // Reset photo assignments
     particles.current.forEach(p => { p.isPhoto = false; p.photoData = null; });
-    
     if (photos.length === 0) return;
 
-    // Distribute photos evenly among particles
-    // We want photos to be "stars" in the system
-    const step = Math.floor(particles.current.length / photos.length);
-    
-    photos.forEach((photo, index) => {
-      const pIndex = (index * step + Math.floor(Math.random() * 10)) % particles.current.length;
-      const p = particles.current[pIndex];
-      p.isPhoto = true;
-      p.photoData = photo;
-      p.baseSize = 6; // Bigger base size for photos
-      p.color = '#ffffff';
+    // Assign photos to random particles
+    const photoIndices = new Set<number>();
+    while(photoIndices.size < photos.length) {
+        const idx = Math.floor(Math.random() * particles.current.length);
+        photoIndices.add(idx);
+    }
+
+    let pIdx = 0;
+    photoIndices.forEach(idx => {
+        const p = particles.current[idx];
+        p.isPhoto = true;
+        p.photoData = photos[pIdx];
+        p.baseSize = 8; 
+        p.color = '#ffffff';
+        pIdx++;
     });
   };
 
@@ -126,50 +210,32 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
 
     if (results.multiHandLandmarks && results.multiHandedness) {
       for (let i = 0; i < results.multiHandLandmarks.length; i++) {
-        const label = results.multiHandedness[i].label; // "Left" or "Right"
-        const landmarks = results.multiHandLandmarks[i];
+        const label = results.multiHandedness[i].label; 
+        const lm = results.multiHandLandmarks[i];
 
-        // LOGIC NOTE: MediaPipe assumes mirrored image input (selfie mode).
-        // "Left" label usually means the user's RIGHT hand in mirror mode.
-        // However, we want to control with our physical Right hand.
-        // In mirrored video: 
-        // User raises Right hand -> Appears on right side of screen -> Labelled "Left" by default MediaPipe model if assuming front camera.
-        // Let's rely on standard: Label 'Left' = User's Right Hand (in default selfie mode)
-        // Wait, MediaPipe Hands 'Left' usually means the model thinks it is a Left hand.
-        // Let's stick to user experience:
-        // We want one hand to point (Cursor), one hand to toggle mode (Menu).
-        
-        // Let's assume:
-        // Label "Left" -> Controls Cursor (User's active hand)
-        // Label "Right" -> Controls Mode (User's passive hand)
-        // (This might be swapped depending on camera mirror settings, but let's implement and user can swap hands if needed)
-
-        if (label === 'Left') { // User's Right hand (usually)
-           const tip = landmarks[8]; // Index finger
-           const rawX = toScreen(tip.x, window.innerWidth, true); // Flip X for mirror feel
+        // "Left" label = User's Right Hand (mirror) -> CURSOR
+        if (label === 'Left') { 
+           const tip = lm[8]; 
+           const rawX = toScreen(tip.x, window.innerWidth, true); 
            const rawY = toScreen(tip.y, window.innerHeight);
            
            s.rawCursor.x = rawX;
            s.rawCursor.y = rawY;
            s.cursor.active = true;
 
-           // Wake Up Logic: Velocity Check
            if (s.mode === AppMode.SLEEP) {
               const dx = rawX - s.lastHandPos.x;
               const dy = rawY - s.lastHandPos.y;
               const speed = Math.hypot(dx, dy);
-              
-              if (speed > 10) { // Moving fast enough
-                 s.wakeEnergy += speed * 0.5;
-              }
+              if (speed > 10) s.wakeEnergy += speed * 0.5;
            }
            s.lastHandPos = { x: rawX, y: rawY };
         } 
         
-        if (label === 'Right') { // User's Left hand (usually)
-           const gesture = detectLeftHandGesture(landmarks);
-           s.leftGesture = gesture;
+        // "Right" label = User's Left Hand -> MODE SWITCH
+        if (label === 'Right') { 
            leftHandDetected = true;
+           s.leftGesture = detectLeftHandGesture(lm);
         }
       }
     }
@@ -178,7 +244,7 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
       s.leftGesture = HandGesture.NONE;
     }
 
-    // State Machine Transitions
+    // State Transitions
     if (s.mode === AppMode.SLEEP) {
        s.wakeEnergy -= CONFIG.WAKE_DECAY;
        if (s.wakeEnergy < 0) s.wakeEnergy = 0;
@@ -186,10 +252,8 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
           s.mode = AppMode.SPHERE;
           onModeChange(AppMode.SPHERE);
        }
-       // Pass wake progress to UI
        onHoverProgress(Math.min(1, s.wakeEnergy / CONFIG.WAKE_THRESHOLD));
     } else {
-       // Mode Toggle Logic
        if (s.leftGesture === HandGesture.OPEN) {
           if (s.mode !== AppMode.GALAXY) {
              s.mode = AppMode.GALAXY;
@@ -199,7 +263,6 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
           if (s.mode !== AppMode.SPHERE) {
              s.mode = AppMode.SPHERE;
              onModeChange(AppMode.SPHERE);
-             // Close photo if we make a fist
              onPhotoOpen(null);
              s.activePhotoId = null;
           }
@@ -213,69 +276,63 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
     const h = window.innerHeight;
     const now = Date.now();
 
-    // 1. Smooth Cursor
+    // Auto Rotate Logic
+    if (s.mode === AppMode.SPHERE || s.mode === AppMode.SLEEP) {
+        s.rot.yaw += s.rotSpeeds.yaw;
+        s.rot.pitch += s.rotSpeeds.pitch;
+        s.rot.roll += s.rotSpeeds.roll;
+    }
+
+    // Cursor Smoothing
     if (s.cursor.active) {
-       // Snap logic overrides smoothing if needed, but basic lerp here
        s.cursor.x = lerp(s.cursor.x, s.rawCursor.x, CONFIG.SMOOTHING_FACTOR);
        s.cursor.y = lerp(s.cursor.y, s.rawCursor.y, CONFIG.SMOOTHING_FACTOR);
     }
 
-    // 2. Global Rotation
-    s.rotation += 0.002;
-
-    // 3. Update Particles
     let nearestPhotoDist = 9999;
     let nearestPhotoId = -1;
 
     particles.current.forEach((p, i) => {
-      let tx = 0, ty = 0, tz = 0;
+      let tx = 0, ty = 0;
 
       if (s.mode === AppMode.SLEEP || s.mode === AppMode.SPHERE) {
-         // Sphere Math
-         // Use Golden Spiral on a Sphere for even distribution
-         const phi = Math.acos( -1 + ( 2 * i ) / CONFIG.PARTICLE_COUNT );
-         const theta = Math.sqrt( CONFIG.PARTICLE_COUNT * Math.PI ) * phi + s.rotation;
+         // CUBE MODE
+         // Use particle's initial random volume position (vx, vy, stableZ)
+         // We construct a stable Z based on ID to maintain shape consistency
+         const stableZ = ((p.id * 137.5) % (CONFIG.CUBE_SIZE * 2)) - CONFIG.CUBE_SIZE;
+
+         // Rotate the point in 3D space
+         const rotated = rotate3D(p.vx, p.vy, stableZ, s.rot.pitch, s.rot.yaw, s.rot.roll);
          
-         const r = CONFIG.SPHERE_RADIUS + (p.z * 50); // Variation in radius
-
-         // Spherical to Cartesian
-         tx = w/2 + r * Math.sin(phi) * Math.cos(theta);
-         ty = h/2 + r * Math.sin(phi) * Math.sin(theta);
-         tz = r * Math.cos(phi);
-
-         // Add float
-         tx += Math.sin(now * 0.001 + p.id) * 5;
-         ty += Math.cos(now * 0.002 + p.id) * 5;
+         // Simple perspective projection
+         const perspective = 1000 / (1000 - rotated.z); 
+         tx = w/2 + rotated.x * perspective;
+         ty = h/2 + rotated.y * perspective;
 
       } else if (s.mode === AppMode.GALAXY) {
-         // Galaxy / Spiral Math
-         // Flatten Z, spread XY
-         const armOffset = (p.id % 3) * (2 * Math.PI / 3); // 3 Arms
-         const distance = 100 + (p.id / CONFIG.PARTICLE_COUNT) * (Math.min(w,h) * 0.4);
-         const galaxyAngle = distance * CONFIG.GALAXY_SPIRAL_TIGHTNESS + s.rotation + armOffset;
+         // FULL SCREEN DIFFUSION
+         // Map normalized coordinates (0-1) to current screen dimensions
+         if (s.galaxyTargets[i]) {
+             tx = s.galaxyTargets[i].nx * w;
+             ty = s.galaxyTargets[i].ny * h;
+         } else {
+             tx = w/2; ty = h/2;
+         }
 
-         tx = w/2 + distance * Math.cos(galaxyAngle);
-         ty = h/2 + distance * Math.sin(galaxyAngle);
-         
-         // Special handling for Photo Particles in Galaxy Mode
-         // Keep them somewhat accessible
-         if (p.isPhoto) {
-             // Override spiral for photos to ensure they are in the "Goldilocks" zone
-             // Map photo index to a grid or inner circle
-             const photoCount = particles.current.filter(x => x.isPhoto).length;
-             const myPhotoIdx = particles.current.filter((x, idx) => x.isPhoto && idx < p.id).length;
-             const angleStep = (Math.PI * 2) / Math.max(1, photoCount);
-             const safeR = Math.min(w,h) * 0.25; // Closer to center
-             tx = w/2 + safeR * Math.cos(s.rotation * 0.5 + myPhotoIdx * angleStep);
-             ty = h/2 + safeR * Math.sin(s.rotation * 0.5 + myPhotoIdx * angleStep);
+         // Add floating drift
+         if (!p.isPhoto) {
+             tx += Math.sin(now * 0.001 + p.id) * 10;
+             ty += Math.cos(now * 0.001 + p.id) * 10;
          }
       }
 
-      // Easing to target
-      p.x = lerp(p.x, tx, 0.08);
-      p.y = lerp(p.y, ty, 0.08);
+      // Physics Move
+      // Use a slightly faster lerp for expansion effect
+      const ease = s.mode === AppMode.GALAXY ? 0.08 : 0.1;
+      p.x = lerp(p.x, tx, ease);
+      p.y = lerp(p.y, ty, ease);
 
-      // Interaction Check (Only in Galaxy Mode)
+      // Interaction
       if (s.mode === AppMode.GALAXY && s.cursor.active && p.isPhoto) {
          const d = getDistance({x: p.x, y: p.y}, s.cursor);
          if (d < CONFIG.SNAP_DISTANCE) {
@@ -287,20 +344,16 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
       }
     });
 
-    // 4. Cursor Interaction Handling
+    // Cursor & Hover Logic
     if (nearestPhotoId !== -1 && !s.activePhotoId) {
-        // Snapping visual effect? Maybe pull cursor slightly?
-        // Let's just track hover
         if (s.hoveredParticleId !== nearestPhotoId) {
             s.hoveredParticleId = nearestPhotoId;
             s.hoverStartTime = now;
             onHoverProgress(0);
         } else {
-            // Still hovering same particle
             const elapsed = now - s.hoverStartTime;
             const progress = Math.min(1, elapsed / CONFIG.DWELL_TIME);
             onHoverProgress(progress);
-            
             if (progress >= 1 && !s.activePhotoId) {
                 const p = particles.current.find(pt => pt.id === nearestPhotoId);
                 if (p && p.photoData) {
@@ -310,21 +363,17 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
             }
         }
     } else {
-        // No valid target
         if (s.hoveredParticleId !== -1 && !s.activePhotoId) {
-            // Only clear hover if we haven't locked a photo open
             s.hoveredParticleId = -1;
             onHoverProgress(0);
         }
     }
 
-    // If active photo is set, but we moved away significantly? 
-    // The prompt says "Move away -> Close".
     if (s.activePhotoId) {
         const activeP = particles.current.find(p => p.photoData?.id === s.activePhotoId);
         if (activeP && s.cursor.active) {
             const dist = getDistance({x: activeP.x, y: activeP.y}, s.cursor);
-            if (dist > CONFIG.SNAP_DISTANCE * 1.5) { // Hysteresis
+            if (dist > CONFIG.SNAP_DISTANCE * 1.5) {
                 s.activePhotoId = null;
                 onPhotoOpen(null);
             }
@@ -340,36 +389,61 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const s = state.current;
+    const now = Date.now();
 
-    // 1. Draw Particles
-    // Use additive blending for "glowing" effect
     ctx.globalCompositeOperation = 'lighter';
     
     particles.current.forEach(p => {
         const isHovered = p.id === s.hoveredParticleId;
         const isActive = p.photoData?.id === s.activePhotoId;
         
+        // Blink logic
+        const blink = Math.sin(now * 0.003 + p.angle) * 0.5 + 0.5; // 0 to 1
+        
         let size = p.baseSize;
-        let alpha = 0.6;
+        let alpha = 0.8;
+        let shadowBlur = 0;
 
-        if (s.mode === AppMode.SLEEP) alpha = 0.2;
+        if (s.mode === AppMode.GALAXY) {
+             // Twinkling stars
+             if (!p.isPhoto) {
+                 alpha = 0.3 + blink * 0.5;
+                 // Some particles act as distant blurred stars
+                 if (p.id % 7 === 0) { 
+                     size *= 1.5;
+                     alpha *= 0.4;
+                 }
+             }
+        }
 
         if (p.isPhoto) {
-            size = isHovered || isActive ? 12 : 6;
+            size = isHovered || isActive ? 16 : 10;
             alpha = 1;
-            ctx.fillStyle = isActive ? '#ffffff' : (isHovered ? COLORS.SECONDARY : COLORS.PRIMARY);
+            ctx.fillStyle = isActive ? '#ffffff' : (isHovered ? COLORS.SECONDARY : '#ffffff');
             
-            if (isHovered) {
-                // Glow ring
-                ctx.beginPath();
-                ctx.arc(p.x, p.y, size * 1.5, 0, Math.PI * 2);
-                ctx.fillStyle = COLORS.SECONDARY;
-                ctx.globalAlpha = 0.3;
-                ctx.fill();
+            // Strong glow for photos
+            shadowBlur = isHovered ? 30 : 15;
+            ctx.shadowColor = isHovered ? COLORS.SECONDARY : COLORS.PRIMARY;
+            
+            // Draw Label if hovered
+            if (isHovered && p.photoData && !s.activePhotoId) {
+                 ctx.save();
+                 ctx.shadowBlur = 0;
+                 ctx.fillStyle = "white";
+                 ctx.font = "bold 14px sans-serif";
+                 ctx.textAlign = "center";
+                 ctx.fillText(p.photoData.name, p.x, p.y + 30);
+                 ctx.restore();
             }
         } else {
             ctx.fillStyle = p.color;
+            if (s.mode === AppMode.SPHERE) {
+                 shadowBlur = 4;
+            }
         }
+
+        ctx.shadowBlur = shadowBlur;
+        if(ctx.shadowBlur > 0 && !ctx.shadowColor) ctx.shadowColor = p.color;
 
         ctx.globalAlpha = alpha;
         ctx.beginPath();
@@ -377,7 +451,7 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
         ctx.fill();
     });
 
-    // 2. Draw Cursor
+    // Draw Cursor
     if (s.cursor.active && s.mode !== AppMode.SLEEP) {
         ctx.globalCompositeOperation = 'source-over';
         ctx.strokeStyle = s.activePhotoId ? COLORS.SECONDARY : COLORS.PRIMARY;
@@ -385,30 +459,17 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
         ctx.shadowBlur = 10;
         ctx.shadowColor = ctx.strokeStyle;
         
-        // Inner Dot
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
-        ctx.arc(s.cursor.x, s.cursor.y, 4, 0, Math.PI * 2);
+        ctx.arc(s.cursor.x, s.cursor.y, 5, 0, Math.PI * 2);
         ctx.fill();
 
-        // Outer Ring
         ctx.beginPath();
-        ctx.arc(s.cursor.x, s.cursor.y, 15, 0, Math.PI * 2);
+        ctx.arc(s.cursor.x, s.cursor.y, 20, 0, Math.PI * 2);
         ctx.stroke();
 
         ctx.shadowBlur = 0;
     }
-  };
-
-  const renderLoop = () => {
-    if (canvasRef.current && window.innerWidth !== canvasRef.current.width) {
-        canvasRef.current.width = window.innerWidth;
-        canvasRef.current.height = window.innerHeight;
-    }
-
-    updatePhysics();
-    draw();
-    requestAnimationFrame(renderLoop);
   };
 
   return (
@@ -417,6 +478,7 @@ const ARView: React.FC<ARViewProps> = ({ photos, onModeChange, onHoverProgress, 
             ref={videoRef} 
             className="absolute top-0 left-0 w-full h-full object-cover transform -scale-x-100 opacity-60 pointer-events-none"
             playsInline 
+            muted
         />
         <canvas 
             ref={canvasRef} 
